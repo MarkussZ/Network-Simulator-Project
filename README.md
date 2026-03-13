@@ -16,3 +16,4 @@ Matplotlib
 ## Future Improvements
 - Interactive graphical interface for dragging and configuring devices
 - Web-based deployment to allow remote access
+- Additional device types and configuration options
