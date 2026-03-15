@@ -244,7 +244,7 @@ def loadNetwork():
         elif deviceType == "PC":
             device = PC(name)
         elif deviceType == "Firewall":
-            device = PC(name)
+            device = Firewall(name)
         else:
             continue
         
