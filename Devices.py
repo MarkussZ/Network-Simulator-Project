@@ -1,28 +1,43 @@
 class Device:
-    def __init__(self, name, deviceType, ports, state = "off", model=None):
+    canHaveIP = False
+    canHaveGateway = False
+    
+    def __init__(self, name, deviceType, ports, state = "off", model=None, vlanID=None):
         self.name = name
         self.deviceType = deviceType
-        self.ports = {port: None for port in ports}
-        self.ip = None
-        self.subnet = None
-        self.state = state
-        self.gateway = None
-        self.wildcard = None
+        self.ports = {
+            port: {
+                "connection": None,
+                "ip": None,
+                "subnet": None,
+                "gateway": None,
+                "wildcard": None,
+                "etherchannel": None,
+                "vlan": None
+            }
+            for port in ports
+        }
+        self.etherchannels = {}
+        self.vlans = {}
+        if vlanID is not None:
+            self.vlans[vlanID] = {
+                "ip": None,
+                "subnet": None,
+                "gateway": None,
+                "members": []
+            }
         self.ipType = None
         self.ipClass = None
         self.model = model
         self.ipv6 = None
+        self.state = state
         
         
     def showPorts(self):
-        lines = []
-        for port, connection in self.ports.items():
-            if connection is None:
-                status = "free"
-            else:
-                status = "used"
-            lines.append(f"{port}: ({status})")
-        return ", ".join(lines)
+        return ", ".join(
+            f"{p}: ({'used' if d.connection else 'free'}, IP: {d.ip or 'No IP' if self.canHaveIP else 'N/A'})"
+            for p, d in self.ports.items()
+        )
     #takes items and returns them as pairs, then joins them as one string
     @staticmethod
     def generatePorts(prefix, count):
@@ -30,27 +45,53 @@ class Device:
     
     def getPortStatistics(self):
         totalPorts = len(self.ports)
-        usedPorts = sum(1 for connection in self.ports.values() if connection is not None)
+        usedPorts = sum(
+            1 for port in self.ports.values()
+            if port["connection"] is not None
+        )
         unusedPorts = totalPorts - usedPorts
         return totalPorts, usedPorts, unusedPorts
     
-class PC(Device):
-    def __init__(self, name):
-        super().__init__(
-            name,
-            "PC",
-            Device.generatePorts("f0/", 1)
-        )
+    @staticmethod
+    def getNextGlobalPoNumber(devices):
+        numbers = []
 
-class Server(Device):
+        for dev in devices.values():
+            for po in dev.etherchannels.keys():
+                if po.startswith("Po"):
+                    try:
+                        numbers.append(int(po[2:]))
+                    except:
+                        pass
+
+        return f"Po{max(numbers, default=0) + 1}"
+    
+ 
+class EndDevice(Device):
+    canHaveIP = True
+    canHaveGateway = True
+    canHaveVLAN = False
+
+    def __init__(self, name, ports):
+        super().__init__(name, self.__class__.__name__, ports)
+        self.vlan = 1
+        self.default_gateway = None
+
+        for port_data in self.ports.values():
+            port_data["vlan"] = self.vlan
+    
+class PC(EndDevice):
     def __init__(self, name):
-        super().__init__(
-            name,
-            "Server",
-            Device.generatePorts("g0/", 2)
-        )
+        super().__init__(name, Device.generatePorts("f0/", 1))
+
+class Server(EndDevice):
+    def __init__(self, name):
+        super().__init__(name, Device.generatePorts("g0/", 2))
 
 class Router(Device):
+    canHaveIP = True
+    canHaveGateway = False
+    canHaveVLAN = False
     models = {
         "4331": {"gigabitethernet": 4},
         "1941": {"gigabitethernet": 2},
@@ -64,6 +105,9 @@ class Router(Device):
         super().__init__(name, "Router", ports, state="off", model=model)
         
 class L2Switch(Device):
+    canHaveIP = False
+    canHaveGateway = False
+    canHaveVLAN = True
     models = {
         "2960": {"fastethernet": 24, "gigabitethernet": 2},
         "2960S": {"fastethernet": 48, "gigabitethernet": 4},
@@ -78,8 +122,18 @@ class L2Switch(Device):
         )
         super().__init__(name, "L2Switch", ports, state="off", model=model)
         
+        # Default all ports to VLAN 1
+        for port in self.ports:
+            self.ports[port]["vlan"] = 1
+
+        # Initialize VLAN 1 in vlans dict
+        self.vlans = {1: {"name": "default", "ports": list(self.ports.keys()), "ip": None}}
+
 
 class L3Switch(Device):
+    canHaveIP = True
+    canHaveGateway = False
+    canHaveVLAN = True
     models = {
         "3650": {"fastethernet": 24, "gigabitethernet": 4},
         "9300": {"fastethernet": 48, "gigabitethernet": 8},
@@ -94,7 +148,60 @@ class L3Switch(Device):
         )
         super().__init__(name, "L3Switch", ports, state="off", model=model)
         
+        # Default all ports to VLAN 1
+        for port in self.ports:
+            self.ports[port]["vlan"] = 1
+
+        self.vlans = {1: {"name": "default", "ports": list(self.ports.keys()), "ip": None}}
+
+        # --- HSRP support ---
+        # Structure: {vlan_id: {"virtual_ip": str, "priority": int, "state": "active"/"standby"}}
+        self.hsrp_groups = {}
+
+    def configure_hsrp(self, vlan_id, virtual_ip, priority=100):
+        """
+        Configures HSRP for a VLAN
+        - vlan_id: VLAN number
+        - virtual_ip: IP that HSRP group will use
+        - priority: determines active/standby (higher = active)
+        """
+        if vlan_id not in self.vlans:
+            raise ValueError(f"VLAN {vlan_id} does not exist on {self.name}")
+        self.hsrp_groups[vlan_id] = {
+            "virtual_ip": virtual_ip,
+            "priority": priority,
+            "state": "standby"  # default, you can calculate later
+        }
+    
+    @staticmethod
+    def determine_hsrp_for_vlan(devices, vlan_id):
+        participants = []
+
+        # Find all L3 switches participating in this VLAN
+        for dev in devices.values():
+            if isinstance(dev, L3Switch) and vlan_id in dev.hsrp_groups:
+                participants.append(dev)
+
+        if not participants:
+            return
+
+        # Ensure all virtual IPs match
+        virtual_ips = {sw.hsrp_groups[vlan_id]["virtual_ip"] for sw in participants}
+        if len(virtual_ips) > 1:
+            print(f"Warning: HSRP virtual IP mismatch in VLAN {vlan_id}")
+            return
+
+        # Elect active (highest priority)
+        active = max(participants, key=lambda sw: sw.hsrp_groups[vlan_id]["priority"])
+
+        # Assign states
+        for sw in participants:
+            sw.hsrp_groups[vlan_id]["state"] = "active" if sw == active else "standby"
+        
 class Firewall(Device):
+    canHaveIP = True
+    canHaveGateway = False
+    canHaveVLAN = False
     def __init__(self, name):
         super().__init__(
             name,
@@ -164,3 +271,4 @@ if __name__ == '__main__': #test code
             print(device.showPorts)
         else:
             print("Invalid option.")
+            

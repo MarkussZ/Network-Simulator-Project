@@ -25,31 +25,7 @@ class IpCalc:
         return True
 
     def ipToBinary(self):
-        ipL = self.ipAddress.split(".")
-        OctF = ""
-        i = 0
-
-        for ip in ipL:
-            ip = int(ip)
-            octe = 256
-            OctS = ""
-            while octe > 1:
-                octe //= 2
-                if ip-octe >= 0:
-                    n = "1"
-                    ip = ip - octe
-                    OctS = OctS + n
-                else:
-                    n = "0"
-                    OctS = OctS + n
-            
-            OctD = int(OctS, 2) #converts binary to number
-            i+=1
-            if i<4:
-                OctF = OctF + OctS + "."
-            else:
-                OctF = OctF + OctS
-        return OctF
+        return ".".join(f"{int(o):08b}" for o in self.ipAddress.split("."))
 
     def subnetChecker(self):
         binary = self.ipToBinary()
@@ -103,12 +79,11 @@ class IpCalc:
             "Broadcast Int": broadcastInt,
             "IP Int": ipInt
         }
+    
     @staticmethod
     def wildcardMask(subnet):
         try:
-            octets = subnet.split(".")
-            wildcard = [str(255-int(o))for o in octets]
-            return ".".join(wildcard)
+            return ".".join(str(255 - int(o)) for o in subnet.split("."))
         except:
             return None
     def ipClass(self):
@@ -145,6 +120,18 @@ class IpCalc:
     def defaultGateway(ip, subnet):
         net = IpCalc.calculateNetwork(ip, subnet)
         return net["First Host"]
+    
+    # Add this inside the IpCalc class
+    @staticmethod
+    def ipInNetwork(ip, network_ip, subnet):
+        """
+        Returns True if `ip` is in the subnet defined by network_ip/subnet
+        """
+        ip_int = IpCalc(ip).ipToInt()
+        net_int = IpCalc(network_ip).ipToInt()
+        subnet_int = IpCalc(subnet).ipToInt()
+        
+        return (ip_int & subnet_int) == (net_int & subnet_int)
     
 class prefixes: #seperate class for prefixes due to ipAddress check at the start of other class
     def __init__(self, prefix):
